@@ -3,4 +3,6 @@ uvicorn
 pymupdf
 python-multipart
 Pillow
+opencv-python
+numpy
 
