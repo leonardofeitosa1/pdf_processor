@@ -5,4 +5,3 @@ python-multipart
 Pillow
 opencv-python
 numpy
-
