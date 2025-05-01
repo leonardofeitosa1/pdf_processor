@@ -139,13 +139,7 @@ async def process_pdf(
 
 from fastapi import Body
 
-@app.post("/ping/")
-async def ping(payload: dict = Body(...)):
-    """
-    Tiny “wake-up” route.
-    n8n sends a POST with any small JSON (or just `{}`),
-    Render spins the container up, and we immediately echo
-    the same payload back. No PDF work, so it returns fast.
-    """
-    return payload
+@app.get("/health")
+def health():
+    return {"ok": True}
 
