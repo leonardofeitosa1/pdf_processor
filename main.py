@@ -47,9 +47,9 @@ def preprocess(pix: fitz.Pixmap) -> bytes:
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
 
-    # Encode as 8-bit gray PNG
+    # Encode as 8-bit gray PNG with lower compression
     _, png_bytes = cv2.imencode(".png", gray,
-                                [cv2.IMWRITE_PNG_COMPRESSION, 3])
+                                [cv2.IMWRITE_PNG_COMPRESSION, 1])
     return png_bytes.tobytes()
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ async def process_pdf(
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for i, page in enumerate(doc):
-            pix = page.get_pixmap(dpi=200)          # a bit sharper than 150 DPI
+            pix = page.get_pixmap(dpi=250)          # less aggressive downscale
             img_data = preprocess(pix)
             zf.writestr(f"{i+1:02d}_{file.filename[:-4]}.png", img_data)
 
@@ -80,13 +80,6 @@ async def process_pdf(
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=pages.zip"}
     )
-
-
-
-
-
-
-
 
 from fastapi import Body
 
