@@ -69,26 +69,8 @@ async def process_pdf(
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # Page filtering logic (only if more than 8 pages)
-        if len(doc) > 8:
-            keywords = ["vencimento", "final", "total a pagar"]
-            useful_pages = []
-
-            for i, page in enumerate(doc):
-                text = page.get_text().lower()
-                score = 0
-                for kw in keywords:
-                    if kw in text:
-                        score += 3
-                score += text.count("/")            # e.g., dates
-                score += text.count(",")            # money values
-                useful_pages.append((i, score))
-
-            # Sort by score descending, keep top 8 pages
-            useful_pages.sort(key=lambda x: x[1], reverse=True)
-            selected_pages = sorted([i for i, _ in useful_pages[:8]])
-        else:
-            selected_pages = list(range(len(doc)))
+        # Process all pages unconditionally
+        selected_pages = list(range(len(doc)))
 
         # Image conversion and zipping
         for i in selected_pages:
