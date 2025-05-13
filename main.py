@@ -69,13 +69,11 @@ async def process_pdf(
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # Process all pages unconditionally
         selected_pages = list(range(len(doc)))
 
-        # Image conversion and zipping
         for i in selected_pages:
             page = doc[i]
-            pix = page.get_pixmap(dpi=250)          # less aggressive downscale
+            pix = page.get_pixmap()  # ← Removed dpi=250 to avoid lowering resolution
             img_data = preprocess(pix)
             zf.writestr(f"{i+1:02d}_{file.filename[:-4]}.png", img_data)
 
