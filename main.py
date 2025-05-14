@@ -90,3 +90,26 @@ from fastapi import Body
 def health():
     return {"ok": True}
 
+@app.post("/decrypt-pdf/")
+async def decrypt_pdf(
+    file: UploadFile = File(...),
+    cpf: str = Form(...),
+):
+    pdf_bytes = await file.read()
+
+    # Try decrypting
+    pw_guesses = [cpf[:5], cpf[:4], cpf[:6], cpf[:3]]
+    doc = pdf_pass(pdf_bytes, pw_guesses)
+    if doc is None:
+        return JSONResponse({"error": "Password (CPF) not accepted"}, status_code=401)
+
+    # Save as unencrypted PDF to a temp buffer
+    output_buffer = io.BytesIO()
+    doc.save(output_buffer, encryption=fitz.PDF_ENCRYPT_NONE)
+    output_buffer.seek(0)
+
+    return StreamingResponse(output_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=decrypted_{file.filename}"}
+    )
+
