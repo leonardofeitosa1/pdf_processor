@@ -113,3 +113,115 @@ async def decrypt_pdf(
         headers={"Content-Disposition": f"attachment; filename=decrypted_{file.filename}"}
     )
 
+
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# ★ colored-transaction extraction service ★
+# ────────────────────────────────────────────────────────────────────────────────
+import re
+from collections import Counter
+
+money_re = re.compile(r'([+\-−–—]?)\s*\d{1,3}(?:\.\d{3})*,\d{2}(?![\d,])')
+date_re  = re.compile(
+    r'^\s*(?:'                                           # início da linha
+    r'(\d{1,2}/\d{1,2}(?:/\d{2,4})?)'                    # 01/10[/24|/2024]
+    r'|'                                                 # ou
+    r'(\d{1,2})\s*'                                      # 01 jan
+    r'(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)' #  jan
+    r'(?:[\s/](\d{2,4}))?'                               #   [/2024]
+    r')\b',
+    re.I
+)
+month_map = {'jan':'01','fev':'02','mar':'03','abr':'04','mai':'05','jun':'06',
+             'jul':'07','ago':'08','set':'09','out':'10','nov':'11','dez':'12'}
+
+def norm_date(m: re.Match) -> str | None:
+    if not m:
+        return None
+    if m.group(1):                                   # formato numérico
+        d, m_, *y = m.group(1).split('/')
+        d = d.zfill(2); m_ = m_.zfill(2)
+        y = y[0] if y else ''
+        if y and len(y) == 2:
+            y = '20' + y
+        return f'{m_}/{d}/{y}' if y else f'{m_}/{d}'
+    else:                                             # formato “01 jan”
+        d = m.group(2).zfill(2)
+        m_ = month_map[m.group(3).lower()]
+        y = m.group(4) or ''
+        if y and len(y) == 2:
+            y = '20' + y
+        return f'{m_}/{d}/{y}' if y else f'{m_}/{d}'
+
+@app.post('/extract-colored-transactions/')
+async def extract_colored_transactions(file: UploadFile = File(...)):
+    """
+    Recebe PDF já descriptografado.
+    Devolve lista de objetos:
+      { purchase_date, description, transaction_value }
+    onde o valor monetário está colorido (verde/azul/vermelho) diferente da cor predominante.
+    """
+    pdf_bytes = await file.read()
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+
+    # 1) Levanta cor predominante, linha por linha
+    color_hist = Counter()
+    lines = []   # (full_line_text, spans_texts[], spans_colors[])
+    for page in doc:
+        for block in page.get_text('dict')['blocks']:
+            if block['type'] != 0:
+                continue
+            for line in block['lines']:
+                txts, cols = [], []
+                for span in line['spans']:
+                    txts.append(span['text'])
+                    cols.append(span['color'])
+                    color_hist[span['color']] += 1
+                if txts:
+                    lines.append((''.join(txts), txts, cols))
+
+    dominant = color_hist.most_common(1)[0][0] if color_hist else None
+    if dominant is None:
+        return {'transactions': []}
+
+    out = []
+    for full, parts, colors in lines:
+        dm = date_re.match(full)
+        if not dm:
+            continue                   # linha precisa iniciar com data
+        purchase_date = norm_date(dm)
+        desc_start = dm.end()
+
+        pos = 0                        # posição corrente dentro da linha completa
+        for part, c in zip(parts, colors):
+            part_start = pos
+            pos += len(part)
+            if c == dominant:
+                continue               # cor igual à predominante → ignora
+            mval = money_re.search(part)
+            if not mval:
+                continue
+            val_str = mval.group(0)
+
+            # descrição é trecho entre fim da data e início do valor colorido
+            abs_val_start = part_start + mval.start()
+            description = full[desc_start:abs_val_start].strip()
+
+            # converte valor pt-BR → float
+            neg = val_str.strip().startswith(('-', '−', '–', '—'))
+            num = re.sub(r'[+\-−–—\s]', '', val_str).replace('.', '').replace(',', '.')
+            try:
+                transaction_value = (-1 if neg else 1) * float(num)
+            except ValueError:
+                continue
+
+            out.append({
+                'purchase_date'   : purchase_date,
+                'description'     : description,
+                'transaction_value': round(transaction_value, 2)
+            })
+            break                      # um valor por linha
+
+    return {'transactions': out}
+
