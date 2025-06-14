@@ -1,9 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, Form, JSONResponse
+from fastapi.responses import StreamingResponse
 import fitz                         # PyMuPDF
 import cv2, numpy as np
 import io, zipfile
 from typing import List
+import re
+from collections import Counter
 
 app = FastAPI()
 
@@ -53,15 +55,15 @@ def preprocess(pix: fitz.Pixmap) -> bytes:
     return png_bytes.tobytes()
 
 # ────────────────────────────────────────────────────────────────────────────────
-# ★ main endpoint ★
+# ★ main endpoints ★
 # ────────────────────────────────────────────────────────────────────────────────
+
 @app.post("/process-pdf/")
 async def process_pdf(
     file: UploadFile = File(...),
     cpf: str       = Form(...),
 ):
     pdf_bytes = await file.read()
-
     pw_guesses = [cpf[:5], cpf[:4], cpf[:6], cpf[:3]]
     doc = pdf_pass(pdf_bytes, pw_guesses)
     if doc is None:
@@ -69,9 +71,7 @@ async def process_pdf(
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        selected_pages = list(range(len(doc)))
-
-        for i in selected_pages:
+        for i in range(len(doc)):
             page = doc[i]
             pix = page.get_pixmap()  # ← Removed dpi=250 to avoid lowering resolution
             img_data = preprocess(pix)
@@ -84,8 +84,6 @@ async def process_pdf(
         headers={"Content-Disposition": "attachment; filename=pages.zip"}
     )
 
-from fastapi import Body
-
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -96,40 +94,66 @@ async def decrypt_pdf(
     cpf: str = Form(...),
 ):
     pdf_bytes = await file.read()
-
-    # Try decrypting
     pw_guesses = [cpf[:5], cpf[:4], cpf[:6], cpf[:3]]
     doc = pdf_pass(pdf_bytes, pw_guesses)
     if doc is None:
         return JSONResponse({"error": "Password (CPF) not accepted"}, status_code=401)
 
-    # Save as unencrypted PDF to a temp buffer
     output_buffer = io.BytesIO()
     doc.save(output_buffer, encryption=fitz.PDF_ENCRYPT_NONE)
     output_buffer.seek(0)
 
-    return StreamingResponse(output_buffer,
+    return StreamingResponse(
+        output_buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=decrypted_{file.filename}"}
     )
 
+@app.post("/reprint-pdf/")
+async def reprint_pdf(
+    file: UploadFile = File(...),
+    cpf: str       = Form(...),
+):
+    pdf_bytes = await file.read()
+    pw_guesses = [cpf[:5], cpf[:4], cpf[:6], cpf[:3]]
+    doc = pdf_pass(pdf_bytes, pw_guesses)
+    if doc is None:
+        return JSONResponse({"error": "Password (CPF) not accepted"}, status_code=401)
 
+    new_doc = fitz.open()  # empty PDF
+    for page_number in range(doc.page_count):
+        page = doc.load_page(page_number)
+        # render at 150 DPI (adjust if needed)
+        mat = fitz.Matrix(150 / 72, 150 / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img_bytes = pix.tobytes("png")
 
+        rect = fitz.Rect(0, 0, pix.width, pix.height)
+        new_page = new_doc.new_page(width=pix.width, height=pix.height)
+        new_page.insert_image(rect, stream=img_bytes)
+
+    output_buffer = io.BytesIO()
+    new_doc.save(output_buffer)
+    output_buffer.seek(0)
+
+    return StreamingResponse(
+        output_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=reprinted_{file.filename}"}
+    )
 
 # ────────────────────────────────────────────────────────────────────────────────
 # ★ colored-transaction extraction service ★
 # ────────────────────────────────────────────────────────────────────────────────
-import re
-from collections import Counter
 
 money_re = re.compile(r'([+\-−–—]?)\s*\d{1,3}(?:\.\d{3})*,\d{2}(?![\d,])')
 date_re  = re.compile(
-    r'^\s*(?:'                                           # início da linha
-    r'(\d{1,2}/\d{1,2}(?:/\d{2,4})?)'                    # 01/10[/24|/2024]
-    r'|'                                                 # ou
-    r'(\d{1,2})\s*'                                      # 01 jan
-    r'(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)' #  jan
-    r'(?:[\s/](\d{2,4}))?'                               #   [/2024]
+    r'^\s*(?:'
+    r'(\d{1,2}/\d{1,2}(?:/\d{2,4})?)'
+    r'|'
+    r'(\d{1,2})\s*'
+    r'(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)'
+    r'(?:[\s/](\d{2,4}))?'
     r')\b',
     re.I
 )
@@ -139,14 +163,14 @@ month_map = {'jan':'01','fev':'02','mar':'03','abr':'04','mai':'05','jun':'06',
 def norm_date(m: re.Match) -> str | None:
     if not m:
         return None
-    if m.group(1):                                   # formato numérico
+    if m.group(1):
         d, m_, *y = m.group(1).split('/')
         d = d.zfill(2); m_ = m_.zfill(2)
         y = y[0] if y else ''
         if y and len(y) == 2:
             y = '20' + y
         return f'{m_}/{d}/{y}' if y else f'{m_}/{d}'
-    else:                                             # formato “01 jan”
+    else:
         d = m.group(2).zfill(2)
         m_ = month_map[m.group(3).lower()]
         y = m.group(4) or ''
@@ -156,18 +180,11 @@ def norm_date(m: re.Match) -> str | None:
 
 @app.post('/extract-colored-transactions/')
 async def extract_colored_transactions(file: UploadFile = File(...)):
-    """
-    Recebe PDF já descriptografado.
-    Devolve lista de objetos:
-      { purchase_date, description, transaction_value }
-    onde o valor monetário está colorido (verde/azul/vermelho) diferente da cor predominante.
-    """
     pdf_bytes = await file.read()
     doc = fitz.open(stream=pdf_bytes, filetype='pdf')
 
-    # 1) Levanta cor predominante, linha por linha
     color_hist = Counter()
-    lines = []   # (full_line_text, spans_texts[], spans_colors[])
+    lines = []
     for page in doc:
         for block in page.get_text('dict')['blocks']:
             if block['type'] != 0:
@@ -189,39 +206,32 @@ async def extract_colored_transactions(file: UploadFile = File(...)):
     for full, parts, colors in lines:
         dm = date_re.match(full)
         if not dm:
-            continue                   # linha precisa iniciar com data
+            continue
         purchase_date = norm_date(dm)
         desc_start = dm.end()
-
-        pos = 0                        # posição corrente dentro da linha completa
+        pos = 0
         for part, c in zip(parts, colors):
             part_start = pos
             pos += len(part)
             if c == dominant:
-                continue               # cor igual à predominante → ignora
+                continue
             mval = money_re.search(part)
             if not mval:
                 continue
-            val_str = mval.group(0)
-
-            # descrição é trecho entre fim da data e início do valor colorido
             abs_val_start = part_start + mval.start()
             description = full[desc_start:abs_val_start].strip()
-
-            # converte valor pt-BR → float
-            neg = val_str.strip().startswith(('-', '−', '–', '—'))
-            num = re.sub(r'[+\-−–—\s]', '', val_str).replace('.', '').replace(',', '.')
+            neg = mval.group(0).strip().startswith(('-', '−', '–', '—'))
+            num = re.sub(r'[+\-−–—\s]', '', mval.group(0)).replace('.', '').replace(',', '.')
             try:
                 transaction_value = (-1 if neg else 1) * float(num)
             except ValueError:
                 continue
-
             out.append({
-                'purchase_date'   : purchase_date,
-                'description'     : description,
+                'purchase_date'    : purchase_date,
+                'description'      : description,
                 'transaction_value': round(transaction_value, 2)
             })
-            break                      # um valor por linha
+            break
 
     return {'transactions': out}
 
